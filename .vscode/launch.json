@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Polytope Oracle: Cube",
+      "type": "python",
+      "request": "launch",
+      "python": "/Users/jjosburn/.conda/envs/dick-und-jane-repl/bin/python3",
+      "program": "${workspaceFolder}/polytope_validator.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "args": ["--case", "cube"]
+    },
+    {
+      "name": "Polytope Oracle: All",
+      "type": "python",
+      "request": "launch",
+      "python": "/Users/jjosburn/.conda/envs/dick-und-jane-repl/bin/python3",
+      "program": "${workspaceFolder}/polytope_validator.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "args": ["--case", "all"]
+    },
+    {
+      "name": "Polytope Scene: All",
+      "type": "python",
+      "request": "launch",
+      "python": "/Users/jjosburn/.conda/envs/dick-und-jane-repl/bin/python3",
+      "program": "${workspaceFolder}/polytope_scene.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "args": ["--scene", "all"]
+    }
+  ]
+}
