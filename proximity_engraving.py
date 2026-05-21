@@ -28,6 +28,7 @@ from polytope_numbers import (
     normalize,
     polytope_edge_faces,
 )
+from subdivide import catmull_clark, normalize_to_sphere
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = ROOT / "polytope-oracle" / "output"
@@ -404,6 +405,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shape", choices=("cube", "octahedron", "icosahedron"),
                         default="cube")
+    parser.add_argument("--camera-x", type=float, default=2.8)
+    parser.add_argument("--camera-y", type=float, default=2.0)
+    parser.add_argument("--camera-z", type=float, default=3.5)
+    parser.add_argument("--subdivide", action="store_true",
+                        help="apply Catmull-Clark subdivision for smooth limit surface")
+    parser.add_argument("--subdiv-levels", type=int, default=2,
+                        help="subdivision levels (default 2)")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     return parser.parse_args()
 
@@ -411,7 +419,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     polytope = make_polytope(args.shape)
-    camera_pos = np.array([2.8, 2.0, 3.5], dtype=float)
+
+    if args.subdivide:
+        verts = polytope.vertices.copy()
+        faces = [list(f) for f in polytope.faces]
+        verts, faces = catmull_clark(verts, faces, levels=args.subdiv_levels)
+        verts = normalize_to_sphere(verts, faces, radius=polytope.sphere_radius)
+        from polytope_numbers import build_polytope
+        polytope = build_polytope(polytope.name, verts, faces)
+
+    camera_pos = np.array([args.camera_x, args.camera_y, args.camera_z], dtype=float)
     camera_target = np.zeros(3, dtype=float)
 
     strokes = generate_strokes(polytope, camera_pos, camera_target)
@@ -419,6 +436,8 @@ def main() -> None:
     out_dir = args.output_dir or DEFAULT_OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"proximity_engraving_{args.shape}"
+    if args.subdivide:
+        stem += f"_subdiv{args.subdiv_levels}"
     pdf_path = out_dir / f"{stem}.pdf"
 
     write_proximity_engraving_pdf(
