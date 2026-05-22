@@ -86,6 +86,18 @@ def random_point_on_face(
     return a + u * (b - a) + v * (c - a)
 
 
+def _noise_1d(t: float, seed: int = 0) -> float:
+    """Simple value noise in 1D — returns [-1, 1] for any float t."""
+    n = int(t * 1000.0 + seed * 137)
+    n = (n << 13) ^ n
+    return ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0 - 1.0
+
+
+def _smooth_noise(t: float, freq: float, seed: int) -> float:
+    """Smoothed noise at frequency *freq* — interpolated value noise."""
+    return _noise_1d(t * freq, seed) * 0.5 + _noise_1d(t * freq + 0.5, seed) * 0.3 + _noise_1d(t * freq + 1.0, seed) * 0.2
+
+
 def freehand_strokes(
     polytope: Polytope,
     camera_pos: np.ndarray,
@@ -95,6 +107,9 @@ def freehand_strokes(
     num_paths: int = 60,
     steps_per_path: int = 40,
     step_size: float = 0.015,
+    sub_steps: int = 1,
+    noise_amplitude: float = 0.0,
+    noise_frequency: float = 2.0,
     direction_inertia: float = 0.8,
     pressure_variation: float = 0.3,
     speed_variation: float = 0.2,
@@ -105,6 +120,10 @@ def freehand_strokes(
     Each path is a random walk across visible faces.  The hand has
     inertia — direction changes are smoothed, pressure varies with
     n·l, and speed varies with local curvature.
+
+    If noise_amplitude > 0, the stroke is displaced perpendicular to
+    its direction using smooth 1D noise — producing a continuous
+    hand-tremor wave along the entire path.
 
     Parameters
     ----------
@@ -189,55 +208,84 @@ def freehand_strokes(
             # ── Step with speed variation ──
             speed = step_size * (1.0 + (random.random() * 2.0 - 1.0) * speed_variation)
             pt_prev = pt.copy()
-            pt = pt_prev + stroke_dir * speed
 
-            # Check if we crossed into an adjacent face
-            # Find which face contains the new point
-            new_fi = fi
-            fc = face_center(verts, face)
-            fn_check = face_normal(verts, face)
-            edge_dist = abs(float(np.dot(fn_check, pt - fc)))
-            if edge_dist > 1e-6:
-                # Point drifted off the face plane — find adjacent face
-                candidates = adj.get(fi, set()) & front_faces
-                best_fi = fi
-                best_dist = float("inf")
-                for cfi in candidates:
-                    cface = polytope.faces[cfi]
-                    cfn = face_normal(verts, cface)
-                    cfc = face_center(verts, cface)
-                    d = abs(float(np.dot(cfn, pt - cfc)))
-                    if d < best_dist:
-                        best_dist = d
-                        best_fi = cfi
-                if best_fi != fi and best_dist < 0.1:
-                    fi = best_fi
-                    face = polytope.faces[fi]
-                    # Recompute stroke direction on new face
-                    fn2 = face_normal(verts, face)
-                    vd2 = camera_pos - pt
-                    vlen2 = float(np.linalg.norm(vd2))
-                    if vlen2 > 1e-9:
-                        vd2n = vd2 / vlen2
-                        new_dir = normalize(np.cross(fn2, vd2n))
-                        if float(np.linalg.norm(new_dir)) > 1e-9:
-                            prev_dir = new_dir * 0.5 + prev_dir * 0.5
-                            prev_dir = normalize(prev_dir)
+            # Sub-steps for smooth noisy curves: divide each step into
+            # smaller segments and apply noise displacement perpendicular
+            # to the stroke direction at each sub-point.
+            if noise_amplitude > 0.0 and sub_steps > 1:
+                sub_dt = 1.0 / sub_steps
+                sub_pts = [pt_prev.copy()]
+                for si in range(sub_steps):
+                    t_sub = step + sub_dt * si
+                    sub_pt = pt_prev + stroke_dir * speed * sub_dt * (si + 1)
+                    # Noise displacement perpendicular to stroke
+                    perp = normalize(np.cross(fn, stroke_dir))
+                    if float(np.linalg.norm(perp)) < 1e-9:
+                        perp = np.cross(fn, np.array([0.0, 1.0, 0.0]))
+                        perp = normalize(perp)
+                    displacement = _smooth_noise(t_sub, noise_frequency, seed + step) * noise_amplitude * 0.02
+                    sub_pt = sub_pt + perp * displacement
+                    sub_pts.append(sub_pt)
 
-            # ── Project to 2D ──
-            pts_2d = project_onto_image(
-                np.array([pt_prev, pt]), camera_pos, camera_target,
-            )
-
-            # ── Stroke properties from pressure ──
-            thick = 0.06 + 0.55 * pressure
-            gray = 0.02 + 0.50 * pressure
-
-            all_strokes.append((
-                (float(pts_2d[0, 0]), float(pts_2d[0, 1])),
-                (float(pts_2d[1, 0]), float(pts_2d[1, 1])),
-                thick, gray,
-            ))
+                # Emit a stroke segment for each sub-step pair
+                for si in range(len(sub_pts) - 1):
+                    pa = sub_pts[si]
+                    pb = sub_pts[si + 1]
+                    pts_2d = project_onto_image(
+                        np.array([pa, pb]), camera_pos, camera_target,
+                    )
+                    thick = 0.06 + 0.55 * pressure
+                    gray = 0.02 + 0.50 * pressure
+                    all_strokes.append((
+                        (float(pts_2d[0, 0]), float(pts_2d[0, 1])),
+                        (float(pts_2d[1, 0]), float(pts_2d[1, 1])),
+                        thick, gray,
+                    ))
+                pt_prev = sub_pts[-1]
+                pt = pt_prev  # for face-crossing below
+            else:
+                pt_prev = pt.copy()
+                pt = pt_prev + stroke_dir * speed
+                pts_2d = project_onto_image(
+                    np.array([pt_prev, pt]), camera_pos, camera_target,
+                )
+                thick = 0.06 + 0.55 * pressure
+                gray = 0.02 + 0.50 * pressure
+                all_strokes.append((
+                    (float(pts_2d[0, 0]), float(pts_2d[0, 1])),
+                    (float(pts_2d[1, 0]), float(pts_2d[1, 1])),
+                    thick, gray,
+                ))
+                # Face-crossing check (only for non-noise path — noise
+                # path uses sub-steps which stay on the face)
+                new_fi = fi
+                fc = face_center(verts, face)
+                fn_check = face_normal(verts, face)
+                edge_dist = abs(float(np.dot(fn_check, pt - fc)))
+                if edge_dist > 1e-6:
+                    candidates = adj.get(fi, set()) & front_faces
+                    best_fi = fi
+                    best_dist = float("inf")
+                    for cfi in candidates:
+                        cface = polytope.faces[cfi]
+                        cfn = face_normal(verts, cface)
+                        cfc = face_center(verts, cface)
+                        d = abs(float(np.dot(cfn, pt - cfc)))
+                        if d < best_dist:
+                            best_dist = d
+                            best_fi = cfi
+                    if best_fi != fi and best_dist < 0.1:
+                        fi = best_fi
+                        face = polytope.faces[fi]
+                        fn2 = face_normal(verts, face)
+                        vd2 = camera_pos - pt
+                        vlen2 = float(np.linalg.norm(vd2))
+                        if vlen2 > 1e-9:
+                            vd2n = vd2 / vlen2
+                            new_dir = normalize(np.cross(fn2, vd2n))
+                            if float(np.linalg.norm(new_dir)) > 1e-9:
+                                prev_dir = new_dir * 0.5 + prev_dir * 0.5
+                                prev_dir = normalize(prev_dir)
 
     return all_strokes
 
@@ -368,6 +416,12 @@ def parse_args() -> argparse.Namespace:
                         help="direction inertia (0=no memory, 1=rigid)")
     parser.add_argument("--pressure-var", type=float, default=0.3,
                         help="pressure variation (0=uniform, 0.3=expressive)")
+    parser.add_argument("--noise", type=float, default=0.0,
+                        help="noise amplitude for hand-tremor displacement")
+    parser.add_argument("--noise-freq", type=float, default=2.0,
+                        help="noise frequency (higher = more wiggles)")
+    parser.add_argument("--sub-steps", type=int, default=1,
+                        help="sub-steps per path step (higher = smoother curves)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     return parser.parse_args()
@@ -386,6 +440,8 @@ def main() -> None:
         num_paths=args.paths, steps_per_path=args.steps,
         direction_inertia=args.inertia,
         pressure_variation=args.pressure_var,
+        noise_amplitude=args.noise, noise_frequency=args.noise_freq,
+        sub_steps=args.sub_steps,
         seed=args.seed,
     )
 
