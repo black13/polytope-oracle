@@ -100,6 +100,11 @@ def monte_carlo_strokes(
     light_pos: np.ndarray = None,
     num_samples: int = 2000,
     stroke_length: float = 20.0,
+    falloff_exponent: float = 2.0,
+    density_curve: float = 1.0,
+    angle_jitter: float = 0.0,
+    length_jitter: float = 0.0,
+    view_weight_strength: float = 0.7,
     seed: int = 42,
 ) -> list[tuple[tuple[float, float], tuple[float, float], float, float]]:
     """Generate strokes via Monte Carlo sampling.
@@ -107,12 +112,28 @@ def monte_carlo_strokes(
     Parameters
     ----------
     light_pos : np.ndarray (3,)
-        Position of the point light source.  Light intensity at a surface
-        point P follows Lambert × 1/r²: max(0, n·(L−P)/d) / d².
+        Position of the point light source.
     num_samples : int
-        Number of random samples to attempt.  More = denser.
+        Number of random samples.  More = denser.
     stroke_length : float
         Nominal stroke length in image pixels.
+    falloff_exponent : float
+        Exponent for distance falloff.  2.0 = 1/r² (physical).
+        1.0 = 1/r (softer falloff).  3.0 = 1/r³ (sharper falloff).
+    density_curve : float
+        Nonlinear mapping from light→probability.
+        1.0 = linear.  >1 = more contrast (shadows darker, lit areas brighter).
+        <1 = flatter (less variation between lit and shadow).
+    angle_jitter : float
+        Random rotation (degrees) added to each stroke direction.
+        0 = perfectly aligned with projected normal.
+        2−5 = subtle hand-drawn wobble.
+    length_jitter : float
+        Fractional random variation in stroke length.
+        0 = uniform length.  0.3 = ±30% variation.
+    view_weight_strength : float
+        How much view obliquity affects stroke probability.
+        0 = ignore view direction.  1.0 = maximum view sensitivity.
     seed : int
         Random seed for reproducibility.
     """
@@ -124,9 +145,7 @@ def monte_carlo_strokes(
 
     verts = polytope.vertices
     front_faces, _, _ = classify_faces(polytope, camera_pos)
-    projected_all = project_onto_image(verts, camera_pos, camera_target)
 
-    # Compute face areas for importance sampling (larger faces get more samples)
     face_areas: dict[int, float] = {}
     total_visible_area = 0.0
     for fi in front_faces:
@@ -153,9 +172,8 @@ def monte_carlo_strokes(
         face = polytope.faces[chosen_fi]
         pt_3d, _ = sample_point_on_face(verts, face)
         fn = face_normal(verts, face)
-        fc = face_center(verts, face)
 
-        # Light intensity at this point: Lambert × 1/r²
+        # ── Light intensity: Lambert × 1/r^falloff_exponent ──
         to_light = light_pos - pt_3d
         dist = float(np.linalg.norm(to_light))
         if dist < 1e-9:
@@ -163,41 +181,52 @@ def monte_carlo_strokes(
         else:
             light_dir = to_light / dist
             ndotl = max(0.0, float(np.dot(fn, light_dir)))
-            light_intensity = ndotl / (dist * dist)
+            light_intensity = ndotl / (dist ** falloff_exponent)
 
-        # Also factor in view obliquity (edge-on faces get more lines)
+        # ── View obliquity ──
         view_dir = camera_pos - pt_3d
         vlen = float(np.linalg.norm(view_dir))
         if vlen < 1e-9:
             continue
         view_dir_n = view_dir / vlen
         ndotv = max(0.01, abs(float(np.dot(fn, view_dir_n))))
-        view_weight = 1.0 - ndotv * 0.7
+        view_weight = 1.0 - ndotv * view_weight_strength
 
-        # Probability of placing a stroke here
-        # High light → low probability (light erodes)
-        # High obliquity → high probability (form turns away)
-        stroke_prob = max(0.02, min(1.0, (1.0 - light_intensity * 0.5) * view_weight))
+        # ── Stroke probability with density curve ──
+        raw_prob = max(0.0, min(1.0, (1.0 - light_intensity) * view_weight))
+        stroke_prob = raw_prob ** (1.0 / max(0.1, density_curve))
+        stroke_prob = max(0.01, min(1.0, stroke_prob))
 
         if random.random() > stroke_prob:
             continue
 
-        # Stroke direction in 3D: perpendicular to normal and view
+        # ── Stroke direction with angular jitter ──
         sd3 = normalize(np.cross(fn, view_dir_n))
         if float(np.linalg.norm(sd3)) < 1e-9:
             sd3 = np.cross(fn, np.array([0.0, 1.0, 0.0]))
+        if angle_jitter > 0.0:
+            jitter_rad = math.radians(angle_jitter * (random.random() * 2.0 - 1.0))
+            cos_j, sin_j = math.cos(jitter_rad), math.sin(jitter_rad)
+            axis = fn
+            sd3 = (sd3 * cos_j + np.cross(axis, sd3) * sin_j +
+                   axis * float(np.dot(axis, sd3)) * (1.0 - cos_j))
+            sd3 = normalize(sd3)
 
-        # Project stroke endpoints to 2D
-        half_len = stroke_length * stroke_prob * 0.5
+        # ── Stroke length with random variation ──
+        length_factor = 1.0
+        if length_jitter > 0.0:
+            length_factor = 1.0 + (random.random() * 2.0 - 1.0) * length_jitter
+        half_len = stroke_length * stroke_prob * 0.5 * length_factor
+
         pt_a = pt_3d - sd3 * half_len * 0.02
         pt_b = pt_3d + sd3 * half_len * 0.02
         pts_2d = project_onto_image(
             np.array([pt_a, pt_b]), camera_pos, camera_target,
         )
 
-        # Thickness and gray: darker where light is weak
-        thickness = 0.08 + 0.45 * (1.0 - stroke_prob)
-        gray = 0.03 + 0.50 * (1.0 - stroke_prob)
+        # ── Thickness and gray ──
+        thickness = 0.06 + 0.50 * (1.0 - stroke_prob)
+        gray = 0.02 + 0.52 * (1.0 - stroke_prob)
 
         all_strokes.append((
             (float(pts_2d[0, 0]), float(pts_2d[0, 1])),
@@ -328,9 +357,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--light-y", type=float, default=4.0)
     parser.add_argument("--light-z", type=float, default=3.0)
     parser.add_argument("--samples", type=int, default=2000,
-                        help="number of Monte Carlo samples (more = denser)")
+                        help="Monte Carlo samples (more = denser)")
     parser.add_argument("--seed", type=int, default=42,
-                        help="random seed for reproducibility")
+                        help="random seed")
+    parser.add_argument("--falloff", type=float, default=2.0,
+                        help="light falloff exponent (2.0 = 1/r^2 physical)")
+    parser.add_argument("--density-curve", type=float, default=1.0,
+                        help="nonlinear contrast (>1 = more contrast)")
+    parser.add_argument("--angle-jitter", type=float, default=0.0,
+                        help="random rotation degrees per stroke (2-5 = hand-drawn)")
+    parser.add_argument("--length-jitter", type=float, default=0.0,
+                        help="random length variation fraction (0.3 = +/-30%)")
+    parser.add_argument("--view-weight", type=float, default=0.7,
+                        help="view obliquity influence (0=none, 1=max)")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     return parser.parse_args()
 
@@ -345,6 +384,9 @@ def main() -> None:
     strokes = monte_carlo_strokes(
         polytope, camera_pos, camera_target,
         light_pos=light_pos, num_samples=args.samples, seed=args.seed,
+        falloff_exponent=args.falloff, density_curve=args.density_curve,
+        angle_jitter=args.angle_jitter, length_jitter=args.length_jitter,
+        view_weight_strength=args.view_weight,
     )
 
     out_dir = args.output_dir or DEFAULT_OUTPUT_DIR
