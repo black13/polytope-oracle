@@ -157,8 +157,23 @@ def main():
     verts, faces = catmull_clark(verts, faces, levels=subdiv)
     verts = normalize_to_sphere(verts, faces, radius=poly.sphere_radius)
 
-    # Curvature
+    # Curvature from polytope model — analytic for regular solids
+    # on a sphere: K = 1/R², k1 = k2 = 1/R, d1,d2 = any tangent basis.
+    # For arbitrary meshes, use Rusinkiewicz estimation as fallback.
+    R = poly.sphere_radius
+    K_analytic = 1.0 / (R * R)
+    k_analytic = 1.0 / R
+
     K, k1, k2, d1, d2, vn = estimate_curvature(verts, faces)
+
+    # Override with analytic values where the mesh approximates a sphere
+    radii = np.linalg.norm(verts, axis=1)
+    max_dev = np.max(np.abs(radii - R))
+    if max_dev < 1e-3:
+        K[:] = K_analytic
+        k1[:] = k_analytic
+        k2[:] = k_analytic
+        print(f"  Using analytic sphere curvature: K={K_analytic:.4f}, k1=k2={k_analytic:.4f}")
     print(f"Subdivided {shape}: {len(verts)} verts, {len(faces)} faces")
     print(f"  K range:  [{K.min():.4f}, {K.max():.4f}]")
     print(f"  k1 range: [{k1.min():.4f}, {k1.max():.4f}]")
