@@ -205,15 +205,46 @@ def main():
         dir_2d_old /= max(np.linalg.norm(dir_2d_old), 1e-9)
         dir_2d_new /= max(np.linalg.norm(dir_2d_new), 1e-9)
 
-        # Short stroke at face center to show direction
-        half = 8.0
+        # Stroke endpoints clipped to face polygon in 2D.
+        # Sutherland-Hodgman: clip segment to convex polygon.
+        def clip_segment_to_poly(x1, y1, x2, y2, poly):
+            seg = np.array([[x1, y1], [x2, y2]])
+            nv = len(poly)
+            for i in range(nv):
+                a = poly[i]
+                b = poly[(i+1) % nv]
+                dx = b[0] - a[0]; dy = b[1] - a[1]
+                nx, ny = -dy, dx  # inward normal (assuming CCW)
+                new_seg = []
+                for j in range(len(seg)):
+                    p_cur = seg[j]
+                    p_prev = seg[(j-1) % len(seg)]
+                    d_cur = nx*(p_cur[0]-a[0]) + ny*(p_cur[1]-a[1])
+                    d_prev = nx*(p_prev[0]-a[0]) + ny*(p_prev[1]-a[1])
+                    if d_cur >= -1e-10:
+                        new_seg.append(p_cur)
+                    if (d_cur >= -1e-10) != (d_prev >= -1e-10):
+                        denom = d_prev - d_cur
+                        if abs(denom) > 1e-12:
+                            t = d_prev / denom
+                            new_seg.append(p_prev + t * (p_cur - p_prev))
+                seg = np.array(new_seg) if new_seg else np.empty((0,2))
+                if len(seg) < 2:
+                    return None
+            return (float(seg[0,0]), float(seg[0,1])), (float(seg[1,0]), float(seg[1,1]))
+
+        # Clipped strokes
+        half = 12.0
         for name, dr, out_list in [('old', dir_2d_old, strokes_old),
                                    ('d1', dir_2d_new, strokes_d1)]:
             a = po - dr * half
             b = po + dr * half
-            out_list.append(((float(a[0]), float(a[1])),
-                             (float(b[0]), float(b[1])),
-                             0.6, 0.05))
+            clipped = clip_segment_to_poly(a[0], a[1], b[0], b[1], poly_2d)
+            if clipped:
+                (ax, ay), (bx, by) = clipped
+                out_list.append(((float(ax), float(ay)),
+                                 (float(bx), float(by)),
+                                 0.6, 0.05))
 
     # Write comparison PDF
     pdf = PurePDF('a4p')
